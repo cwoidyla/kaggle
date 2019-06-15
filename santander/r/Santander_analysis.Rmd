@@ -1,0 +1,230 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+Goal: Find out which bank accounts customers would like based on their marketing data
+obstacles: lots of customers, lots of categorical features, some numerical data
+Solution: Use kmodes, then apriori on accounts of customer segments
+
+Goal: Run K modes algorithm on data
+1) obstacles: data is not formatted as it should be. Kmodes expects purely categorical. Some numerical data exists. Could use k prototypes but there is not a solution implemented in R
+  
+Load libraries
+```{r}
+set.seed(1680) # for reproducibility
+
+library(dplyr) # for data cleaning
+library(cluster) # for gower similarity and pam
+library(Rtsne) # for t-SNE plot
+library(ggplot2) # for visualization
+
+```
+
+
+Load the training data
+```{r}
+library(readr)
+data_dir <- "C:/Users/Owner/Desktop/MGMT552/Santander/renta_samples/2015-12-28.csv"
+train_2 <- "C:/Users/Owner/Desktop/MGMT552/Santander/train_ver2.csv"
+data <- read_csv(data_dir)
+# View columns
+names(data)
+```
+
+Exploratory Data Analsysis:
+```{r}
+#view columns
+names(data)
+
+```
+View summary statistics for each column
+```{r}
+summary(data)
+```
+view unique values
+```{r}
+apply(data, 2, function(x)length(unique(x)))
+```
+View column data type
+```{r}
+sapply(data, typeof)
+```
+View total number of NaNs
+```{r}
+sum(apply(data, 2, is.na))
+```
+Drop corrupted columns
+```{r}
+#ult_fec_cli_1t (11), conyuemp (16)
+clean_data <- data[c(-11,-16)]
+```
+
+The only columns that should be numerical are age(6) and renta(21). Everything else should be a factor.
+```{r}
+factor_data <- clean_data
+cols <- 1:length(clean_data)
+cols <- cols[! cols %in% c(6, 21)] # exclude age and renta indices
+factor_data[cols] <- lapply(factor_data[cols], factor)
+sapply(factor_data, nlevels) # how many levels does each factored column have?
+#sapply(factor_data, typeof)
+```
+Separate categorical predictor and target variables
+```{r}
+pred_var <- factor_data[1:22]
+target_var <- factor_data[23:46]
+```
+Merge feature vector rows in target_var
+```{r}
+target_var_merge <- apply(target_var, 1, paste, collapse="")
+```
+
+Determine number of classes by counting the number of unique rows in target_var
+```{r}
+library(plyr)
+#counts frequency of each unique combination rows
+classes <- count(target_var, vars = names(target_var))
+nrow(classes) # 112 rows, therefore, 112 potential classes
+# sorts unique rows from most frequent to least
+classes[with(classes, order(-freq)), ]
+# *** Alternatively ***
+classes <- count(target_var_merge)
+classes[with(classes, order(-freq)), ]
+```
+
+K medoids
+```{r}
+library(cluster) # for gower similarity and pam
+gower_dist <- daisy(pred_var[, -2],
+                    metric = "gower",
+                    type = list(logratio = 3))
+summary(gower_dist)
+```
+
+View most similar and disimilar items
+```{r}
+gower_mat <- as.matrix(gower_dist)
+# Most similar
+pred_var[
+  which(gower_mat == min(gower_mat[gower_mat != min(gower_mat)]),
+        arr.ind = TRUE)[1, ], ]
+```
+Most disimilar
+```{r}
+# Most dissimilar
+pred_var[
+  which(gower_mat == max(gower_mat[gower_mat != max(gower_mat)]),
+        arr.ind = TRUE)[1, ], ]
+```
+
+Run PAM on gower distances of marketing data
+```{r}
+#Determine how to parallelize this for larger dataset
+sil_width <- c(NA)
+
+for(i in 2:112){
+  print(i) # print the cluster number being computed.
+  pam_fit <- pam(gower_dist,
+                 diss = TRUE,
+                 k = i)
+  
+  sil_width[i] <- pam_fit$silinfo$avg.width
+  
+}
+```
+Plot silhouette
+```{r}
+# Plot sihouette width (higher is better)
+plot(1:112, sil_width,
+     xlab = "Number of clusters",
+     ylab = "Silhouette Width")
+lines(1:112, sil_width)
+```
+
+Using silhouette widths, the optimal number of clusters is three. However, since there are so very many more classes, it may make more sense to use a higher number of clusters in order have higher resolution in predicting which accounts customers are likely to want. The top five cluster numbers are: 3, 2, 102, 104, 103
+```{r}
+cluster_df <- data.frame(1:112, sil_width)
+# sort from highest silhouette width to least
+head(cluster_df[with(cluster_df, order(-sil_width)), ], 5)
+```
+
+Interpret clusters
+```{r}
+pam_fit <- pam(gower_dist, diss = TRUE, k = 3)
+pam_results <- pred_var %>%
+  dplyr::select(-ncodpers) %>%
+  mutate(cluster = pam_fit$clustering) %>%
+  group_by(cluster) %>%
+  do(the_summary = summary(.))
+
+pam_results$the_summary
+```
+
+Map clusters back to their target variables.
+```{r}
+# merged target variables with cluster numbers
+target_var_clusters <- data.frame(accounts = target_var_merge, 
+                                  cluster = pam_fit$clustering)
+# unmerged target variables with cluster numbers
+tar_var_clusters <- data.frame(target_var, cluster = pam_fit$clustering)
+tar_var_clusters$cluster <- factor(tar_var_clusters$cluster)
+
+
+```
+Divide target variables into their clusters. Remove cluster number column
+```{r}
+cluster1 <- target_var_clusters[which(target_var_clusters$cluster==1), -2]
+cluster2 <- target_var_clusters[which(target_var_clusters$cluster==2), -2]
+cluster3 <- target_var_clusters[which(target_var_clusters$cluster==3), -2]
+```
+
+Find frequency of unique rows in each cluster.
+```{r}
+c1.classes <- count(cluster1)
+c1.classes <- c1.classes[with(c1.classes, order(-freq)), ]
+c2.classes <- count(cluster2)
+c2.classes <- c2.classes[with(c2.classes, order(-freq)), ]
+c3.classes <- count(cluster3)
+c3.classes <- c3.classes[with(c3.classes, order(-freq)), ]
+
+```
+
+Find differences between each cluster
+```{r}
+require(dplyr)
+detach("package:dplyr", unload=TRUE)
+
+c1c2 <- union(cluster1, cluster2)
+c2c3 <- union(cluster2, cluster3)
+c1c3 <- union(cluster1, cluster3)
+c1.c2c3 <- setdiff(cluster1, c2c3) # in c1, not in c2 and c3
+c2.c1c3 <- setdiff(cluster2, c1c3) # in c2, not in c1 and c3
+c3.c1c2 <- setdiff(cluster3, c1c2) # in c3, not in c1 and c2
+
+```
+
+
+Find association rules in each cluster
+```{r}
+library(arules)
+library(arulesViz)
+library(datasets)
+
+target_trans <- as(tar_var_clusters, "transactions")
+inspect(target_trans)
+
+# frequent items
+frequentItems <- eclat(target_trans, parameter = list(supp = 0.07, maxlen = 15))
+itemFrequencyPlot(target_trans, topN=10, type="absolute") #plot frequent items
+
+rules = apriori(target_trans, parameter=list(minlen=24, maxlen=24, support=0.01, confidence=0.5))
+
+inspect(head(sort(rules, by="lift"),9))
+
+#rules2 = apriori(cluster1, parameter=list(support=0.01, confidence=0.5));
+
+#rules3 = apriori(cluster1, parameter=list(support=0.01, confidence=0.5));
+```
+
+
+
+
